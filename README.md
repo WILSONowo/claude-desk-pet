@@ -58,7 +58,7 @@ pip install pillow
 **在终端里的 Claude Code**，输入：
 
 ```
-/plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
+/plugin install Desk-Pet --marketplace WILSONowo/claude-desk-pet
 ```
 
 然后按 `y` 添加插件市场，选择 user（用户）范围，按回车确认。
@@ -66,10 +66,10 @@ pip install pillow
 **也可以在命令行里运行：**
 
 ```bash
-claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
+claude plugin install Desk-Pet --marketplace WILSONowo/claude-desk-pet
 ```
 
-**在 Claude 桌面端**：点输入框旁边的 **+** → **Plugins** → **Add marketplace**，填入 `BingXing-ai/claude-desk-pet`，再点 **Add plugin**。
+**在 Claude 桌面端**：点输入框旁边的 **+** → **Plugins** → **Add marketplace**，填入 `WILSONowo/claude-desk-pet`，再点 **Add plugin**。
 
 装好后，新开一个会话，桌宠就会出现在屏幕右下角。
 
