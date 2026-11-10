@@ -43,6 +43,25 @@ class BubbleImageTest(unittest.TestCase):
         self.assertGreater(im.getpixel((im.width // 2, im.height - 3))[3], 0)
         self.assertEqual(im.getpixel((2, im.height - 3))[3], 0)
 
+    def test_tail_is_symmetric(self):
+        im = bubble_image(BubbleLayout(('abcdefgh',)), STYLE)
+        tail = im.crop((0, im.height - 8, im.width, im.height))
+        self.assertEqual(alphas(tail), alphas(tail.transpose(Image.FLIP_LEFT_RIGHT)))
+
+    def test_dots_keep_bubble_size_and_text_start(self):
+        frames = [bubble_image(BubbleLayout(('thinking...',)), STYLE, dots=n) for n in (1, 2, 3)]
+        self.assertEqual({f.size for f in frames}, {frames[0].size})
+
+        def first_ink_column(im):
+            px = im.load()
+            return min(x for x in range(im.width) for y in range(im.height) if px[x, y][:3] == (58, 42, 26))
+        self.assertEqual({first_ink_column(f) for f in frames}, {first_ink_column(frames[0])})
+        self.assertNotEqual(frames[0].tobytes(), frames[2].tobytes())  # 点数不同，画面不同
+
+    def test_three_dots_same_as_plain_text(self):
+        plain = bubble_image(BubbleLayout(('thinking...',)), STYLE)
+        self.assertEqual(plain.tobytes(), bubble_image(BubbleLayout(('thinking...',)), STYLE, dots=3).tobytes())
+
 
 class PasteTest(unittest.TestCase):
     def test_clips_negative_offset_without_error(self):

@@ -1,6 +1,12 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Totals } from '../types'
+// 累计的 token 用量（四类分开记，命中率 = 缓存读取 / 全部输入）
+type Totals = {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
 
 // 桌宠的状态（悬浮窗程序按这个名字换表情）
 type PetState = 'thinking' | 'tool' | 'reading' | 'waiting' | 'celebrate' | 'error' | 'aborted' | 'stone'
@@ -14,8 +20,9 @@ type Usage = {
   cache_creation_input_tokens: number
 }
 
-const SESSION = { plugin: 'desk-pet', key: 'session' } as const
-const LAST_COST = { plugin: 'desk-pet', key: 'lastCost' } as const
+// 本会话的记账：totals 是累计用量，lastCost 是上次记账时的会话花费（美元），用来算项目累计的增量
+// 存在 $.store 里按会话 id 分开（不用 $.state，那样 plugin.json 就不需要 types 字段，旧版本也能装）
+type SessionRecord = { totals: Totals; lastCost: number }
 const EMPTY: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
 // 读资料类工具 → 记笔记表情；其余 → 敲键盘
@@ -45,6 +52,7 @@ let runDir = ''
 let petFile = ''
 let project = ''
 let cwd = ''
+let sessionKey = ''
 let toolErrors = 0
 
 const fmt = (n: number) =>
@@ -65,9 +73,21 @@ const describe = (tool: string, input: Record<string, unknown>) => {
   if (tool === 'Read') return file ? `在读 ${file}` : '在翻文件…'
   if (tool === 'Grep' || tool === 'Glob') return '在找东西…'
   if (tool === 'WebSearch' || tool === 'WebFetch') return '在上网查…'
-  if (tool === 'Agent') return '派小助手干活中'
-  if (tool.startsWith('mcp__')) return `在用 ${tool.split('__').pop()}`
-  return `在用 ${tool}`
+  if (tool === 'Agent' || tool === 'Task') return '派小助手干活中…'
+  if (tool.startsWith('mcp__')) return describeMcp(tool)
+  return `在用 ${tool}…`
+}
+
+// MCP 工具名形如 mcp__<服务名>__<工具名>，服务名有时是一串 id，直接显示不好看
+const describeMcp = (tool: string) => {
+  const [, server = '', name = ''] = tool.split('__')
+  if (/browser|chrome|playwright|puppeteer/i.test(server)) return '在操作浏览器…'
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(server) || !server) return name ? `在用 ${name}…` : '在用扩展工具…'
+  return `在用 ${server}…`
+}
+
+async function readSession($: EngineInterface) {
+  return ((await $.store.get(sessionKey)) as SessionRecord | undefined) ?? { totals: EMPTY, lastCost: 0 }
 }
 
 // 写状态文件给悬浮窗读；sound 让悬浮窗播放提示音（引擎在 Windows 上没有播放器）
@@ -104,38 +124,65 @@ async function sendPetCommand($: EngineInterface, args: string) {
   await $.fs.write(`${runDir}/command.json`, JSON.stringify({ id, args, ts }))
 }
 
+// 状态栏的中英文
+type Lang = 'zh' | 'en'
+const STATUS_TEXT = {
+  zh: { session: '当前会话', input: '输入', output: '输出', cacheHit: '缓存命中', context: '上下文', fiveHour: '5h额度' },
+  en: { session: 'Session', input: 'Input', output: 'Output', cacheHit: 'Cache hit', context: 'Context', fiveHour: '5h Limit' },
+}
+
+// 系统语言是中文就用中文，否则用英文
+const systemLang = (): Lang => {
+  try {
+    return /^zh/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ? 'zh' : 'en'
+  } catch {
+    return 'zh'
+  }
+}
+
+// 语言：桌宠右键菜单里选的（存在 settings.json 的 lang），没选过就跟随系统
+async function statusLang($: EngineInterface): Promise<Lang> {
+  try {
+    const text = await $.fs.read(`${runDir}/settings.json`)
+    const lang = typeof text === 'string' ? JSON.parse(text).lang : undefined
+    if (lang === 'zh' || lang === 'en') return lang
+  } catch {}
+  return systemLang()
+}
+
 async function refreshStatus($: EngineInterface) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const t = (await readSession($)).totals
   const usage = await $.session.usage()
+  const s = STATUS_TEXT[await statusLang($)]
   const parts = [
-    `📊 本会话 输入 ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
-    `输出 ${fmt(t.output)}`,
-    `缓存命中 ${hitRate(t)}`,
+    `${s.session} ${s.input} ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
+    `${s.output} ${fmt(t.output)}`,
+    `${s.cacheHit} ${hitRate(t)}`,
   ]
-  if (usage.cost) parts.push(`$${usage.cost.usd.toFixed(2)}`)
-  if (usage.context.percent !== undefined) parts.push(`上下文 ${usage.context.percent}%`)
+  if (usage.context.percent !== undefined) parts.push(`${s.context} ${usage.context.percent}%`)
   const fiveHour = usage.rateLimits.find(r => r.kind === 'five_hour')
-  if (fiveHour) parts.push(`5h额度 ${fiveHour.percentUsed}%`)
+  if (fiveHour) parts.push(`${s.fiveHour} ${fiveHour.percentUsed}%`)
   $.ui.status(parts.join(' · '))
 }
 
-// 把本轮用量记进会话累计和项目累计（项目累计跨会话保存）
+// 把一次请求的用量记进会话累计和项目累计（项目累计跨会话保存）；u 为空时只更新花费
 async function account($: EngineInterface, u: Usage | undefined) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const { totals: t, lastCost } = await readSession($)
   const add: Totals = u
     ? { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens }
     : EMPTY
-  await $.state.set(SESSION, {
-    input: t.input + add.input,
-    output: t.output + add.output,
-    cacheRead: t.cacheRead + add.cacheRead,
-    cacheWrite: t.cacheWrite + add.cacheWrite,
-  })
-
   const usage = await $.session.usage()
   const cost = usage.cost?.usd ?? 0
-  const { value: lastCost = 0 } = await $.state.get(LAST_COST)
-  await $.state.set(LAST_COST, cost)
+  const record: SessionRecord = {
+    totals: {
+      input: t.input + add.input,
+      output: t.output + add.output,
+      cacheRead: t.cacheRead + add.cacheRead,
+      cacheWrite: t.cacheWrite + add.cacheWrite,
+    },
+    lastCost: cost,
+  }
+  await $.store.set(sessionKey, record)
 
   const key = `project:${cwd}`
   const p = ((await $.store.get(key)) as ProjectTotals | undefined) ?? { ...EMPTY, costUsd: 0, sessions: 1 }
@@ -149,8 +196,19 @@ async function account($: EngineInterface, u: Usage | undefined) {
   })
 }
 
+// 每次模型请求结束就记一次账并刷新状态栏。记账排队执行：子代理并行时几个请求可能同时结束，
+// 同时读-改-写 $.store 会互相覆盖
+let accounting: Promise<void> = Promise.resolve()
+function recordUsage($: EngineInterface, u: Usage | undefined) {
+  accounting = accounting
+    .then(() => account($, u))
+    .then(() => refreshStatus($))
+    .catch(err => $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' }))
+  return accounting
+}
+
 async function statsText($: EngineInterface) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const t = (await readSession($)).totals
   const p = (await $.store.get(`project:${cwd}`)) as ProjectTotals | undefined
   const usage = await $.session.usage()
   const line = (name: string, x: Totals) =>
@@ -175,12 +233,13 @@ export const register: Register = on => {
     // 运行目录放在 ~/.claude/desk-pet，不放进 mod 文件夹（避免触发热重载）
     const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/\\/g, '/')
     runDir = `${home}/.claude/desk-pet`
-    petFile = `${runDir}/sessions/${await $.session.id()}.json`
+    const sessionId = await $.session.id()
+    petFile = `${runDir}/sessions/${sessionId}.json`
+    sessionKey = `session:${sessionId}`
 
     // 新会话在项目累计里记一次
-    const { value: seen } = await $.state.get(SESSION)
-    if (seen === undefined) {
-      await $.state.set(SESSION, EMPTY)
+    if ((await $.store.get(sessionKey)) === undefined) {
+      await $.store.set(sessionKey, { totals: EMPTY, lastCost: 0 })
       const key = `project:${cwd}`
       const p = (await $.store.get(key)) as ProjectTotals | undefined
       if (p) await $.store.set(key, { ...p, sessions: p.sessions + 1 })
@@ -203,7 +262,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       toolErrors = 0
-      await pet($, 'thinking', '思考中')
+      await pet($, 'thinking', '思考中…')
     }
     return next(e)
   })
@@ -225,20 +284,24 @@ export const register: Register = on => {
         else await pet($, 'error', '出错了…')
       } else {
         toolErrors = 0
-        await pet($, 'thinking', '思考中')
+        await pet($, 'thinking', '思考中…')
       }
     }
     return ran
   }).catch(($, e, next) => next(e)) // 桌宠这边出任何错，都照常放行工具调用
 
+  // 一轮里的每次模型请求（主循环和子代理都算）：响应完整收到后立刻记账，状态栏不用等整轮结束
+  // 只读结果、不改内容；记账出错只写调试日志，不影响模型回复
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    await recordUsage($, response.usage ?? undefined)
+    return response
+  })
+
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    try {
-      await account($, e.usage)
-      await refreshStatus($)
-    } catch (err) {
-      $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' })
-    }
+    // 用量已经在 turn.step 里按请求记过了（一轮的用量就是各次请求之和），这里只刷新额度和上下文
+    await recordUsage($, undefined)
 
     if (e.agentId !== undefined) return done
 

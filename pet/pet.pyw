@@ -46,7 +46,7 @@ import dpi  # noqa: E402
 dpi.enable()
 
 import winapi  # noqa: E402  要等 DPI 感知设好以后再导入，窗口坐标才是真实像素
-from bubble import layout  # noqa: E402
+from bubble import ELLIPSIS, layout  # noqa: E402
 from layered import LayeredWindow  # noqa: E402
 from render import BubbleStyle, bubble_image, compose, draw_marks  # noqa: E402
 from blink import closed as eyes_closed, start as start_blink, step as step_blink  # noqa: E402
@@ -73,6 +73,7 @@ STRIDES_PER_S = 1.2   # 每秒走几个整步；速度由它和步幅算出来�
 BUBBLE_MAX_W = 260    # 气泡最宽多少像素（100% 缩放）；放不下就换行，最多两行
 BUBBLE_AREA = 66      # 角色头顶留给气泡的高度（两行正文 + 尖角）
 BUBBLE_CACHE = 64     # 最多缓存多少张气泡图（文件名一直在变，不能无限存）
+ANIMATED_DOTS = {'thinking', 'tool', 'reading'}  # 这几种状态句尾的「…」会跳；出错、被打断这类保持静止
 SWING_V = 250         # 拖得比这快（像素/秒，100% 缩放），被拎着的她就往反方向歪
 PATCHES = os.path.join(HERE, 'sprites', 'patches.json')   # 眨眼补丁的位置（tools/blink_patch.py 生成）
 LINES = os.path.join(HERE, 'lines.json')   # 台词，可以随便改
@@ -338,16 +339,16 @@ class Pet:
             self.cache[key] = prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip, patch)
         return self.cache[key]
 
-    def bubble_for(self, text, sub=None):
-        """这句话（和第二行小字）的气泡图；同样的内容只画一次。"""
-        key = (text, sub)
+    def bubble_for(self, text, sub=None, dots=None):
+        """这句话（和第二行小字）的气泡图；同样的内容只画一次。dots 见 render.bubble_image。"""
+        key = (text, sub, dots)
         if key not in self.bubble_cache:
             if len(self.bubble_cache) >= BUBBLE_CACHE:
                 self.bubble_cache = {}
             # 10 是气泡左右内边距（见 render.bubble_image），扣掉它，气泡外宽才不会超过 BUBBLE_MAX_W
             max_w = round(BUBBLE_MAX_W * self.scale) - 2 * self.style.px(10)
             lay = layout(text, self.style.measure, max_w, sub)
-            self.bubble_cache[key] = bubble_image(lay, self.style)
+            self.bubble_cache[key] = bubble_image(lay, self.style, dots)
         return self.bubble_cache[key]
 
     def fit_width(self, width):
@@ -450,6 +451,12 @@ class Pet:
         self.menu.add_checkbutton(label='提示音', variable=self.sound_var, command=self.toggle_sound)
         self.chat_var = tk.BooleanVar(value=self.settings.get('chat', True) is not False)
         self.menu.add_checkbutton(label='闲聊', variable=self.chat_var, command=self.toggle_chat)
+        # 状态栏语言：插件那边读 settings.json 的 lang，下一次刷新状态栏时生效
+        lang_menu = tk.Menu(self.menu, tearoff=0, font=self.font)
+        self.lang_var = tk.StringVar(value=self.settings.get('lang', 'auto'))
+        for value, label in (('auto', '跟随系统 / Auto'), ('zh', '中文'), ('en', 'English')):
+            lang_menu.add_radiobutton(label=label, variable=self.lang_var, value=value, command=self.set_lang)
+        self.menu.add_cascade(label='状态栏语言 / Language', menu=lang_menu)
         self.menu.add_separator()
         self.break_var = tk.BooleanVar(value=self.break_cfg.enabled)
         self.menu.add_checkbutton(label='休息提醒', variable=self.break_var, command=self.toggle_break)
@@ -526,6 +533,10 @@ class Pet:
 
     def toggle_chat(self):
         self.settings['chat'] = self.chat_var.get()
+        save_settings(self.settings)
+
+    def set_lang(self):
+        self.settings['lang'] = self.lang_var.get()
         save_settings(self.settings)
 
     def toggle_break(self):
@@ -892,12 +903,13 @@ class Pet:
         sprite_bottom = (self.line_y + round((1 - pose.anchor) * img.height)
                          + round((self.bob_for(pose.file, t) + hop) * self.scale))
         self.sprite_box = (0, sprite_bottom - img.height, img.height)
-        text = self.display_text()
-        if (self.claude_state() == 'thinking' and self.text.endswith('中')
-                and not self.break_state.level and not self.speech_state()):
-            text = self.text + '.' * (int(t * 2.5) % 3 + 1)  # “思考中” 后面的点点点一跳一跳
-        image = compose(img, sprite_bottom, self.bubble_for(text, self.bubble_sub()), self.bubble_h + self.bubble_dy,
-                        self.min_w, self.H)
+        text, dots = self.display_text(), None
+        if (self.claude_state() in ANIMATED_DOTS and text == self.text and text.endswith(ELLIPSIS)
+                and not self.break_state.level):
+            # 思考 / 敲键盘 / 读资料时，句尾的「…」变成一跳一跳的点点点；气泡按三个点的宽度排，文字不左右晃
+            text, dots = text[:-1] + '...', int(t * 2.5) % 3 + 1
+        image = compose(img, sprite_bottom, self.bubble_for(text, self.bubble_sub(), dots),
+                        self.bubble_h + self.bubble_dy, self.min_w, self.H)
         if pose.file.startswith('sleep'):  # z Z 从头顶右上方冒出来（离开头发，免得压在黑色蝴蝶结上看不见）
             top = sprite_bottom - img.height
             draw_marks(image, zz_marks(t, self.scale), image.width // 2 + round(img.width * 0.36),

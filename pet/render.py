@@ -13,15 +13,18 @@ PAPER = (255, 250, 243, 255)
 INK = (58, 42, 26, 255)
 SUB_INK = (150, 136, 122, 255)
 SS = 3                      # 气泡的形状按 3 倍画再缩小，边缘才平滑；文字直接按原尺寸画（字体自带抗锯齿）
-FONT_FILE, FONT_INDEX = 'msyh.ttc', 1   # Microsoft YaHei UI
+# 依次试：微软雅黑 UI → 微软雅黑 → 黑体；都没有就用 Pillow 自带的字体
+FONTS = (('msyh.ttc', 1), ('msyh.ttc', 0), ('msyh.ttf', 0), ('simhei.ttf', 0))
 
 
 @functools.lru_cache(maxsize=16)
 def _font(px: int):
-    try:
-        return ImageFont.truetype(FONT_FILE, px, index=FONT_INDEX)
-    except OSError:
-        return ImageFont.load_default(px)
+    for file, index in FONTS:
+        try:
+            return ImageFont.truetype(file, px, index=index)
+        except OSError:
+            pass
+    return ImageFont.load_default(px)
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,10 @@ class BubbleStyle:
 
 
 def _shape(w: int, box_h: int, tail: int, s: BubbleStyle, k: int) -> Image.Image:
-    """气泡的外形（圆角框 + 底部正中的小尖角），按 k 倍画。"""
+    """气泡的外形（圆角框 + 底部正中的对称小尖角），按 k 倍画。"""
     W, H, B = w * k, (box_h + tail) * k, max(2, s.px(2)) * k
     r, bottom, cx = s.px(12) * k, box_h * k, w * k // 2
-    left, right, tip = cx - s.px(4) * k, cx + s.px(8) * k, bottom + tail * k
+    left, right, tip = cx - s.px(6) * k, cx + s.px(6) * k, bottom + tail * k   # 尖角左右对称
     im = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.rounded_rectangle((0, 0, W - 1, bottom - 1), radius=r, fill=ORANGE)
@@ -56,7 +59,9 @@ def _shape(w: int, box_h: int, tail: int, s: BubbleStyle, k: int) -> Image.Image
     return im
 
 
-def bubble_image(layout: BubbleLayout, style: BubbleStyle) -> Image.Image:
+def bubble_image(layout: BubbleLayout, style: BubbleStyle, dots: int | None = None) -> Image.Image:
+    """dots：最后一行以 "..." 结尾时只画前 dots 个点（点点点动画）。气泡宽度和这行的起点都按三个点算，
+    点一个个冒出来时气泡不变宽、文字不左右晃。"""
     s = style
     pad_x, pad_y, line_h, sub_h, tail = s.px(10), s.px(7), s.px(19), s.px(16), s.px(10)
     widths = [s.font.getlength(t) for t in layout.lines]
@@ -68,8 +73,12 @@ def bubble_image(layout: BubbleLayout, style: BubbleStyle) -> Image.Image:
     im = shape.resize((w, box_h + tail), Image.LANCZOS)
     d = ImageDraw.Draw(im)
     y = pad_y
-    for text, tw in zip(layout.lines, widths):
-        d.text(((w - tw) / 2, y), text, font=s.font, fill=INK)
+    last = len(layout.lines) - 1
+    for i, (text, tw) in enumerate(zip(layout.lines, widths)):
+        x = (w - tw) / 2
+        if dots is not None and i == last and text.endswith('...'):
+            text = text[:-3] + '.' * dots
+        d.text((x, y), text, font=s.font, fill=INK)
         y += line_h
     if layout.sub:
         d.text(((w - widths[-1]) / 2, y + s.px(1)), layout.sub, font=s.small, fill=SUB_INK)

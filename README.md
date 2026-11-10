@@ -26,11 +26,17 @@
 - 她偶尔会主动说话：早上问好、饭点提醒吃饭、平时随口聊两句（右键菜单可以关掉「闲聊」）
 - 同时开着好几个会话时，气泡下面会多一行小字，告诉你别的会话在等你或者出错了
 - **双击**桌宠：把 Claude 窗口叫到前台
-- **右键**菜单：调大小（小/中/大）、切到 Claude 时自动隐藏、提示音开关、退出
+- **右键**菜单：调大小（小/中/大）、切到 Claude 时自动隐藏、提示音开关、状态栏语言、退出
 
 **📊 Token 状态栏**：输入框下方常驻一行用量信息
 
-> 📊 本会话 输入 12.3k · 输出 4.1k · 缓存命中 87% · $0.42 · 上下文 31% · 5h额度 23%
+> 当前会话 输入 12.3k · 输出 4.1k · 缓存命中 87% · 上下文 31% · 5h额度 23%
+
+英文版：
+
+> Session Input 12.3k · Output 4.1k · Cache hit 87% · Context 31% · 5h Limit 23%
+
+默认跟随系统语言，也可以在桌宠右键菜单的「状态栏语言 / Language」里切换
 
 **🔔 提示音**：回复完播放钢琴"叮咚"，出错播放复古 RPG"哔哔"
 
@@ -77,6 +83,8 @@
 
 ## 运行要求
 
+> 🍎 **macOS 用户**：这个仓库目前只支持 Windows，请使用 [wangmeng003](https://github.com/wangmeng003) 维护的 Mac 移植版：[claude-desk-pet-mac](https://github.com/wangmeng003/claude-desk-pet-mac)
+
 - **Windows**（悬浮窗和提示音用的是 Windows 的接口）
 - **Python 3**，并且在命令行里输入 `python` 能直接运行
 - **Pillow** 图像库，用下面这条命令安装：
@@ -90,7 +98,7 @@ pip install pillow
 **在终端里的 Claude Code**，输入：
 
 ```
-/plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
+/plugin install Desk-Pet --marketplace WILSONowo/claude-desk-pet
 ```
 
 然后按 `y` 添加插件市场，选择 user（用户）范围，按回车确认。
@@ -98,10 +106,10 @@ pip install pillow
 **也可以在命令行里运行：**
 
 ```bash
-claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
+claude plugin install Desk-Pet --marketplace WILSONowo/claude-desk-pet
 ```
 
-**在 Claude 桌面端**：点输入框旁边的 **+** → **Plugins** → **Add marketplace**，填入 `BingXing-ai/claude-desk-pet`，再点 **Add plugin**。
+**在 Claude 桌面端**：点输入框旁边的 **+** → **Plugins** → **Add marketplace**，填入 `WILSONowo/claude-desk-pet`，再点 **Add plugin**。
 
 装好后，新开一个会话，桌宠就会出现在屏幕右下角。
 
@@ -112,10 +120,11 @@ claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
 - **换提示音**：替换 `sounds/done.wav`（完成）和 `sounds/error.wav`（出错）
 - **改台词**：Claude 状态的气泡文字写在 `hooks/register.ts` 里；闲聊、摸头、戳她的台词写在 `pet/lines.json` 里
 
-桌宠的位置、大小和开关保存在 `~/.claude/desk-pet/settings.json`。
+桌宠的位置、大小、开关和状态栏语言（`lang`：`zh` / `en` / `auto`）保存在 `~/.claude/desk-pet/settings.json`。
 
 ## 说明
 
 - 这是个人粉丝作品，与 Anthropic 官方无关
 - 立绘由作者用 AI 绘图生成，最初是为自己的视频做的素材
 - 代码使用 MIT 许可证，详见 [LICENSE](LICENSE)
+- 感谢 [wangmeng003](https://github.com/wangmeng003) 移植了 [macOS 版](https://github.com/wangmeng003/claude-desk-pet-mac)
