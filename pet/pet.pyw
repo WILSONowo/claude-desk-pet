@@ -34,7 +34,7 @@ from motion import (
     settle, spawn, swing_step, tick,
 )
 from screen import choose_z, is_fullscreen
-from sessions import Session, summarize
+from sessions import Session, new_sound, summarize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.path.join(os.path.dirname(HERE), 'sounds')
@@ -66,6 +66,7 @@ OTHER_SPRITES = ('remind-1', 'remind-2', 'remind-3', 'sleep-1', 'sleep-2', 'held
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 BASE_H = 400          # 立绘源图里角色大约多高；各张图按同一个比例缩放，姿势之间才能保持相对大小
 IDLE_AFTER = 10 * 60  # 等你回复超过 10 分钟就开始打瞌睡
+OOPS_S = 3.0          # 一次工具调用失败：皱眉这么久，然后接着想办法
 SLEEP_S = 1.2         # 打瞌睡两帧交替的间隔
 SWING_V = 250         # 拖得比这快（像素/秒，100% 缩放），被拎着的她就往反方向歪
 SWING_HOLD_S = 0.3    # 甩动停下后，身体还歪着多久才回正
@@ -294,21 +295,33 @@ def save_settings(s):
 
 
 def read_sessions():
-    """读所有会话的状态；顺手清掉两天前的旧文件。"""
+    """读所有会话的状态；顺手清掉已经关掉的会话（ended）和一天没动静的旧文件。"""
     out, now = [], time.time()
     for p in glob.glob(os.path.join(SESSIONS, '*.json')):
         try:
             mtime = os.path.getmtime(p)
-            if now - mtime > 2 * 86400:
+            if now - mtime > 86400:
                 os.remove(p)
                 continue
             with open(p, encoding='utf-8') as f:
                 data = json.load(f)
-            out.append(Session(mtime=mtime, state=str(data.get('state', 'waiting')), text=str(data.get('text', '')),
-                               project=str(data.get('project', '')), sound=str(data.get('sound') or '')))
+            state = str(data.get('state', 'waiting'))
+            if state == 'ended':
+                os.remove(p)
+                continue
+            out.append(Session(mtime=mtime, state=state, text=str(data.get('text', '')),
+                               project=str(data.get('project', '')), sound=str(data.get('sound') or ''),
+                               key=os.path.splitext(os.path.basename(p))[0],
+                               since=seconds(data.get('since')), turn=seconds(data.get('turn')),
+                               helpers=int(data.get('helpers') or 0)))
         except Exception:
             continue
     return out
+
+
+def seconds(ms):
+    """mod 写的时间是毫秒，没有就是 0。"""
+    return ms / 1000 if isinstance(ms, (int, float)) and ms > 0 else 0.0
 
 
 def log_error(message=None):
@@ -424,8 +437,8 @@ class Pet:
 
         self.state, self.text, self.project = 'waiting', '我来啦～', ''
         self.state_since = time.time()
-        self.last_mtime = 0
-        self.last_mtime_seen = 0
+        self.last_seen = None          # 桌宠上次显示的是哪个会话的哪次写入：(会话 id, 写入时间)
+        self.sound_seen = None         # 各会话上次的写入时间，用来判断谁刚写了提示音
         self.hop_at = time.time()
         self.hidden = False
         self.forced_hidden = False     # /pet hide 藏起来了
@@ -622,8 +635,11 @@ class Pet:
         return None if self.speaking() or self.break_state.level else self.sub
 
     def effective_state(self):
-        if self.state == 'waiting' and time.time() - self.state_since > IDLE_AFTER:
+        age = time.time() - self.state_since
+        if self.state == 'waiting' and age > IDLE_AFTER:
             return 'idle'
+        if self.state == 'oops':  # 一次工具调用失败：皱一下眉，然后接着想办法
+            return 'error' if age < OOPS_S else 'thinking'
         return self.state
 
     def speaking(self):
@@ -1013,19 +1029,23 @@ class Pet:
     # ---------- 循环 ----------
     def poll(self):
         try:
-            summary = summarize(read_sessions(), time.time())  # 跟着最新的会话；别的会话的情况写进第二行小字
+            now, items = time.time(), read_sessions()
+            sound, self.sound_seen = new_sound(items, self.sound_seen)  # 哪个会话干完了都响，不只是正在跟的那个
+            if sound:
+                self.play(sound)
+            summary = summarize(items, now)   # 跟哪个会话；别的会话的情况写进第二行小字
             self.sub = summary.sub
-            latest = summary.main
-            if latest and latest.mtime != self.last_mtime:
-                self.last_mtime_seen, self.last_mtime = self.last_mtime, latest.mtime
-                state = latest.state if latest.state in SPRITES else 'waiting'
+            main = summary.main
+            if main and (main.key, main.mtime) != self.last_seen:
+                self.last_seen = (main.key, main.mtime)
+                state = 'waiting' if main.state == 'hello' else main.state
+                state = state if state in SPRITES or state == 'oops' else 'waiting'
                 changed = state != self.state
-                self.state, self.text, self.project = state, latest.text, latest.project
-                self.state_since = time.time()
-                if latest.sound in ('done', 'error') and self.last_mtime_seen:  # 刚启动时不重播旧提示音
-                    self.play(latest.sound)
+                self.state, self.text, self.project = state, main.text, main.project
+                # 状态从什么时候开始按会话里记的算：换回一个早就干完的会话时不会重新敲门；只是换了文字也不重新计时
+                self.state_since = min(now, main.started) if main.since else (now if changed else self.state_since)
                 if changed:
-                    self.hop_at = time.time()
+                    self.hop_at = now
             self.check_command()
         except Exception:
             log_error()

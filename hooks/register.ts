@@ -9,7 +9,10 @@ type Totals = {
 }
 
 // 桌宠的状态（悬浮窗程序按这个名字换表情）
-type PetState = 'thinking' | 'tool' | 'reading' | 'waiting' | 'celebrate' | 'error' | 'aborted' | 'stone'
+// hello：新会话开场打招呼（不算"在等你"）；oops：一次工具调用失败（Claude 一般会自己处理，桌宠只皱一下眉）；
+// error：这一轮以出错结束；ended：会话关了，桌宠看到就删掉这个文件
+type PetState =
+  | 'hello' | 'thinking' | 'tool' | 'reading' | 'waiting' | 'celebrate' | 'error' | 'aborted' | 'stone' | 'oops' | 'ended'
 
 type ProjectTotals = Totals & { costUsd: number; sessions: number }
 
@@ -55,6 +58,18 @@ let cwd = ''
 let sessionKey = ''
 let toolErrors = 0
 
+// 写给桌宠的状态：主循环自己的状态 + 正在干活的小助手（子代理）。两边谁的动静新就说谁的
+const AGENT_TOOLS = new Set(['Agent', 'Task'])
+const AGENT_TEXT = '派小助手干活中…'
+const HELPER_STALE_MS = 15 * 60_000           // 小助手这么久没动静就当它已经结束了（漏掉了结束事件）
+let mainBusy = false                          // 主循环这一轮还没结束
+let mainStatus: [PetState, string] = ['hello', '我来啦～']
+let helperStatus: [PetState, string] = ['tool', '在干活…']
+const helpers = new Map<string, number>()     // 小助手 id → 最近一次动静的时间
+let seq = 0, mainSeq = 0, helperSeq = 0       // 谁的动静更新（主循环还是小助手）
+let turnAt = 0                                // 你最近一次发消息（这一轮开始）的时间；桌宠按它决定跟哪个会话
+let since = 0, shownState = ''                // 当前状态从什么时候开始的（换了文字不算换状态）
+
 const fmt = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${n}`
 
@@ -65,6 +80,32 @@ const hitRate = (t: Totals) => {
 
 const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p
 
+// 气泡里显示的项目名：worktree（<仓库>/.claude/worktrees/<名字>）显示所属仓库的名字
+const projectName = (dir: string) => {
+  const p = dir.replace(/\\/g, '/').replace(/\/+$/, '')
+  const wt = p.match(/^(.*)\/\.claude\/worktrees\/[^/]+$/)
+  return baseName(wt ? wt[1] : p)
+}
+
+// 现在该给桌宠看什么：主循环在等小助手、或者小助手的动静更新时说小助手在干什么；
+// 这一轮结束了但小助手还在后台，就在"轮到你啦"后面带一句
+function compose(
+  main: [PetState, string], busy: boolean, helper: [PetState, string], count: number, helperNewer: boolean,
+): [PetState, string] {
+  const [state, text] = main
+  if (count === 0) return main
+  if (!busy) {
+    if (state === 'waiting' || state === 'celebrate') {
+      return [state, `轮到你啦！${count === 1 ? '小助手还在后台' : `${count} 个小助手在后台`}`]
+    }
+    return main
+  }
+  if (text === AGENT_TEXT || helperNewer) {
+    return [helper[0], count === 1 ? `小助手${helper[1]}` : `小助手×${count} ${helper[1]}`]
+  }
+  return main
+}
+
 // 工具名 → 气泡里的一句话
 const describe = (tool: string, input: Record<string, unknown>) => {
   const file = typeof input.file_path === 'string' ? baseName(input.file_path) : ''
@@ -73,7 +114,7 @@ const describe = (tool: string, input: Record<string, unknown>) => {
   if (tool === 'Read') return file ? `在读 ${file}` : '在翻文件…'
   if (tool === 'Grep' || tool === 'Glob') return '在找东西…'
   if (tool === 'WebSearch' || tool === 'WebFetch') return '在上网查…'
-  if (tool === 'Agent' || tool === 'Task') return '派小助手干活中…'
+  if (AGENT_TOOLS.has(tool)) return AGENT_TEXT
   if (tool.startsWith('mcp__')) return describeMcp(tool)
   return `在用 ${tool}…`
 }
@@ -91,12 +132,35 @@ async function readSession($: EngineInterface) {
 }
 
 // 写状态文件给悬浮窗读；sound 让悬浮窗播放提示音（引擎在 Windows 上没有播放器）
-// 出错也不能影响 Claude 干活
-async function pet($: EngineInterface, state: PetState, text: string, sound?: 'done' | 'error') {
+// 排队写：几个小助手同时有动静时不会互相覆盖。出错也不能影响 Claude 干活
+let writing: Promise<void> = Promise.resolve()
+function show($: EngineInterface, sound?: 'done' | 'error') {
+  writing = writing.then(() => writeStatus($, sound)).catch(() => {})
+  return writing
+}
+
+async function writeStatus($: EngineInterface, sound?: 'done' | 'error') {
   if (!petFile) return
+  const ts = await $.clock.now()
+  for (const [id, at] of helpers) if (ts - at > HELPER_STALE_MS) helpers.delete(id)
+  const [state, text] = compose(mainStatus, mainBusy, helperStatus, helpers.size, helperSeq > mainSeq)
+  if (state !== shownState) {
+    shownState = state
+    since = ts
+  }
+  await $.fs.write(petFile, JSON.stringify({ state, text, project, ts, since, turn: turnAt, helpers: helpers.size, sound }))
+}
+
+// 主循环换状态
+function setMain($: EngineInterface, state: PetState, text: string, sound?: 'done' | 'error') {
+  mainStatus = [state, text]
+  mainSeq = ++seq
+  return show($, sound)
+}
+
+async function refreshProject($: EngineInterface) {
   try {
-    const ts = await $.clock.now()
-    await $.fs.write(petFile, JSON.stringify({ state, text, project, ts, sound }))
+    project = projectName(await $.session.root())
   } catch {}
 }
 
@@ -253,25 +317,47 @@ export const register: Register = on => {
       immediate: true,
     })
 
-    await pet($, 'waiting', '我来啦～')
+    await refreshProject($)
+    mainBusy = false
+    helpers.clear()
+    shownState = ''
+    turnAt = 0
+    await setMain($, 'hello', '我来啦～')
     void launchPet($)
     void refreshStatus($).catch(() => {})
     return started
   })
 
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) {
-      toolErrors = 0
-      await pet($, 'thinking', '思考中…')
-    }
+    try {
+      if (e.agentId === undefined) {
+        // 你发了新消息：重新看一下项目名（会话可能刚换了文件夹或 worktree），记下这一轮开始的时间
+        toolErrors = 0
+        mainBusy = true
+        await refreshProject($)
+        turnAt = await $.clock.now()
+        await setMain($, 'thinking', '思考中…')
+      } else {
+        // 小助手（子代理）开工
+        helpers.set(e.agentId, await $.clock.now())
+        await show($)
+      }
+    } catch {}
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
     const isMain = e.agentId === undefined
+    const input = e as unknown as Record<string, unknown>
+    const status: [PetState, string] = [READING.has(e.tool) ? 'reading' : 'tool', describe(e.tool, input)]
     if (isMain) {
-      const input = e as unknown as Record<string, unknown>
-      await pet($, READING.has(e.tool) ? 'reading' : 'tool', describe(e.tool, input))
+      await setMain($, ...status)
+    } else if (!AGENT_TOOLS.has(e.tool)) {
+      // 小助手的动作：记下来，桌宠说"小助手在读 xx"；顺便证明这个会话还活着
+      helpers.set(e.agentId, await $.clock.now())
+      helperStatus = status
+      helperSeq = ++seq
+      await show($)
     }
 
     const ran = await next(e)
@@ -279,12 +365,14 @@ export const register: Register = on => {
     if (isMain) {
       if (ran.deny === undefined && ran.isError === true) {
         toolErrors += 1
-        // 连续出错 3 次：石化彩蛋
-        if (toolErrors >= 3) await pet($, 'stone', '石化了…')
-        else await pet($, 'error', '出错了…')
+        // 连续出错 3 次：石化彩蛋；偶尔一次失败很常见，Claude 会自己想办法，只皱一下眉
+        if (toolErrors >= 3) await setMain($, 'stone', '石化了…')
+        else await setMain($, 'oops', '出错了，想想办法…')
       } else {
         toolErrors = 0
-        await pet($, 'thinking', '思考中…')
+        // 派出去的小助手有的还没回来：继续说小助手的事
+        if (!(AGENT_TOOLS.has(e.tool) && helpers.size > 0)) await setMain($, 'thinking', '思考中…')
+        else await show($)
       }
     }
     return ran
@@ -303,19 +391,35 @@ export const register: Register = on => {
     // 用量已经在 turn.step 里按请求记过了（一轮的用量就是各次请求之和），这里只刷新额度和上下文
     await recordUsage($, undefined)
 
-    if (e.agentId !== undefined) return done
+    if (e.agentId !== undefined) {
+      // 小助手收工
+      helpers.delete(e.agentId)
+      await show($)
+      return done
+    }
 
+    mainBusy = false
     if (e.reason === 'aborted') {
-      await pet($, 'aborted', '被打断了…')
+      await setMain($, 'aborted', '被打断了…')
     } else if (e.reason === 'error' || e.reason === 'refusal') {
-      await pet($, 'error', '出错了，来看看？', 'error')
+      await setMain($, 'error', '出错了，来看看？', 'error')
     } else if (e.durationMs > 180_000) {
       // 干了 3 分钟以上的大活：撒花
-      await pet($, 'celebrate', '搞定啦！轮到你～', 'done')
+      await setMain($, 'celebrate', '搞定啦！轮到你～', 'done')
     } else {
-      await pet($, 'waiting', '轮到你啦！', 'done')
+      await setMain($, 'waiting', '轮到你啦！', 'done')
     }
     return done
+  })
+
+  // 会话关掉了：告诉桌宠，它会删掉这个会话的状态文件，不再当成"在等你"
+  on('session.end', async ($, e, next) => {
+    try {
+      mainBusy = false
+      helpers.clear()
+      await setMain($, 'ended', '')
+    } catch {}
+    return next(e)
   })
 
   on('command.run', { command: 'token-stats' }, async ($, e, next) => ({ text: await statsText($) }))
