@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pet'))
 
-from screen import choose_z, is_fullscreen  # noqa: E402
+from screen import choose_z, is_fullscreen, place_bubble, visible_span  # noqa: E402
 
 MONITOR = (0, 0, 1920, 1080)
 
@@ -48,3 +48,32 @@ class ChooseZTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PlaceBubbleTest(unittest.TestCase):
+    def test_centered_when_there_is_room(self):
+        self.assertEqual(place_bubble(100, 200, 0, 400, 20), 150)
+
+    def test_moves_in_from_the_right_edge(self):
+        self.assertEqual(place_bubble(100, 200, 0, 230, 20), 130)
+
+    def test_moves_in_from_the_left_edge(self):
+        self.assertEqual(place_bubble(100, 200, 170, 400, 20), 170)
+
+    def test_the_tail_stays_under_the_bubble(self):
+        # 角色贴着屏幕右边：气泡往里挪也得盖住尾巴
+        self.assertEqual(place_bubble(100, 200, 0, 190, 20), 120)
+
+    def test_wider_than_the_screen_keeps_the_left_side(self):
+        self.assertEqual(place_bubble(300, 200, 100, 300, 20), 100)
+
+
+class VisibleSpanTest(unittest.TestCase):
+    def test_fully_on_screen(self):
+        self.assertEqual(visible_span(100, 400, (0, 0, 1920, 1080)), (0, 400))
+
+    def test_hanging_off_the_right(self):
+        self.assertEqual(visible_span(1700, 400, (0, 0, 1920, 1080)), (0, 216))
+
+    def test_hanging_off_the_left_rounds_inward(self):
+        self.assertEqual(visible_span(-30, 400, (0, 0, 1920, 1080)), (32, 400))

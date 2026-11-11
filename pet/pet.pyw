@@ -33,7 +33,7 @@ from motion import (
     FIXED_SPRITES, Posture, Swing, build_surfaces, choose_pose, choose_surface, fixed_sprite, hold, hop_to, release,
     settle, spawn, swing_step, tick,
 )
-from screen import choose_z, is_fullscreen
+from screen import choose_z, is_fullscreen, place_bubble, visible_span
 from sessions import Session, new_sound, summarize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +84,7 @@ HOP = 14    # 换状态时跳起的高度
 UP = 7      # 平时动作往上的最大幅度（急着跺脚时最高）
 BOB = 3     # 平时动作往下的最大幅度
 GAP = 4     # 跳到最高时，头顶和气泡尖之间至少留这么多
+BUBBLE_W = 340  # 窗口（气泡最宽能到）多宽；角色在中间，气泡跟着文字变宽，两边多出来的地方是透明的
 SUB_H = 16  # 第二行小字占的高度；窗口顶上一直留着，有小字时气泡往上长，角色位置不变
 
 user32 = ctypes.windll.user32
@@ -512,7 +513,8 @@ class Pet:
                 sizes.append(im.size)
         self.char_h = round(max(h for _, h in sizes) * self.k)
         self.char_w = round(max(w for w, _ in sizes) * self.k)
-        self.W = max(self.char_w, round(190 * s))
+        self.W = max(self.char_w, round(BUBBLE_W * s))
+        self.span, self.span_at = (0, self.W), None   # 窗口里在屏幕上的那一段（气泡别伸出屏幕）
         # 气泡在最上面，下面给跳跃和晃动留够空间，角色怎么动都碰不到气泡，也不会出窗口底边
         self.bubble_bottom = round((38 + SUB_H) * s)
         self.tail_tip = self.bubble_bottom + round(10 * s)
@@ -540,10 +542,11 @@ class Pet:
         """按当前台词排好气泡：算出文字和气泡的位置，画好不带文字的气泡底图。"""
         s, measure = self.scale, self.pfont.getlength
         pad = round(10 * s)
-        max_w = self.W - 2 * pad - 4
+        lo, hi = max(1, self.span[0]), min(self.W - 2, self.span[1])
+        max_w = max(round(100 * s), hi - lo - 2 * pad - 4)   # 文字最宽多少：窗口多宽、屏幕边上还剩多少
         state = self.effective_state()
         text, sub, self.dots_base = self.display_text(), self.bubble_sub(), None
-        self.bubble_key = (state, text, sub)
+        self.bubble_key = (state, text, sub, self.span)
         if (state in ANIMATED and not self.speaking() and not self.break_state.level
                 and (text.endswith('…') or text == '思考中')):
             # 末尾的省略号换成一跳一跳的点点点；文字左对齐，按三个点的宽度留好位置，点数变化时文字不会左右晃
@@ -553,20 +556,21 @@ class Pet:
             text = fit_text(text, max_w, measure)
         text_w = measure(text)
         self.bubble_text = text
-        self.text_x = self.W / 2 - text_w / 2
-        left, right = self.text_x, self.text_x + text_w
         # 有第二行小字时气泡往上多长一行；没有时，上面那一行的位置空着（透明）
         y0 = 2 if sub else 2 + round(SUB_H * s)
         self.text_y = y0 + round(18 * s)
         if sub:
             sub = fit_text(sub, max_w, self.sfont.getlength)
-            sub_w = self.sfont.getlength(sub)
-            left, right = min(left, self.W / 2 - sub_w / 2), max(right, self.W / 2 + sub_w / 2)
-        x0 = max(1, math.floor(left) - pad)
-        x1 = min(self.W - 2, math.ceil(right) + pad)
+        inner = max(text_w, self.sfont.getlength(sub) if sub else 0)
+        # 气泡跟着文字变宽，以角色为中心；靠近屏幕边时往里挪，尾巴还是指着她
+        width = math.ceil(inner) + 2 * pad
+        x0 = round(place_bubble(width, self.W / 2, lo, hi, round(18 * s)))
+        x1 = x0 + width
+        mid = (x0 + x1) / 2
+        self.text_x = mid - text_w / 2
         self.bubble_bg = self.bubble_image(x0, x1, y0)
         if sub:
-            ImageDraw.Draw(self.bubble_bg).text((self.W / 2, self.text_y + round(17 * s)), sub, font=self.sfont,
+            ImageDraw.Draw(self.bubble_bg).text((mid, self.text_y + round(17 * s)), sub, font=self.sfont,
                                                 fill=SUB_INK, anchor='mm')
         self.bubble_cache = {}
 
@@ -676,10 +680,11 @@ class Pet:
         if not isinstance(x, int) or not isinstance(y, int):
             # 第一次打开：主显示器（坐标原点所在的那块）工作区的右下角
             _, (left, top, right, bottom) = monitor_at(0, 0)
-            x, y = right - self.W - round(40 * self.scale), bottom - self.H
+            x, y = right - (self.W + self.char_w) // 2 - round(40 * self.scale), bottom - self.H
         # 拉回到窗口中心所在（或最近）的那块显示器里，副屏拔掉之后也不会跑到看不见的地方
         (left, top, right, bottom), _ = monitor_at(x + self.W // 2, y + self.H // 2)
-        x = min(max(left, x), right - self.W)
+        side = (self.W - self.char_w) // 2   # 窗口两边透明的部分可以伸出屏幕，角色本身不出屏
+        x = min(max(left - side, x), right - self.W + side)
         y = min(max(top, y), bottom - self.H)
         self.root.geometry(f'{self.W}x{self.H}+{x}+{y}')
 
@@ -689,6 +694,17 @@ class Pet:
         if pos != self.win_pos:
             self.win_pos = pos
             self.root.geometry(f'{self.W}x{self.H}+{pos[0]}+{pos[1]}')
+
+    def update_span(self):
+        """窗口挪动后，重新算窗口里哪一段在屏幕上（只在窗口位置变了时才查显示器）。"""
+        if self.roam and self.win_pos:
+            x, y = self.win_pos
+        else:
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+        if (x, y) != self.span_at:
+            self.span_at = (x, y)
+            monitor, _ = monitor_at(x + self.W // 2, y + self.floor)
+            self.span = visible_span(x, self.W, monitor)
 
     def feet(self):
         """脚底中点的屏幕坐标。"""
@@ -1074,8 +1090,9 @@ class Pet:
         self.blink = step_blink(self.blink, t, random)
         if self.drag is not None and self.moved:
             self.swing = swing_step(self.swing, self.throw_velocity()[0], t, SWING_V * self.scale, SWING_HOLD_S)
-        if (self.effective_state(), self.display_text(), self.bubble_sub()) != self.bubble_key:
-            self.draw_bubble()  # 换了台词、小字，或者开始打瞌睡
+        self.update_span()
+        if (self.effective_state(), self.display_text(), self.bubble_sub(), self.span) != self.bubble_key:
+            self.draw_bubble()  # 换了台词、小字，开始打瞌睡，或者挪到了屏幕边上
         file, flip, anchor = self.current_pose(t)
         blink = file in self.patches and eyes_closed(self.blink, t)
         since = t - self.hop_at

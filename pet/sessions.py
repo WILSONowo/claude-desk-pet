@@ -89,8 +89,8 @@ def summarize(items: list, now: float) -> Summary:
     ) if g]
     if not groups:
         return Summary(main, None)
-    # 气泡很窄：最要紧的那类写名字（只有一个时），第二类只写个数，再往后的不写
-    parts = [_part(*groups[0])] + [f'{len(g)} 个{verb}' for g, verb in groups[1:2]]
+    # 最多说两类（只有一个会话时写名字，几个时写个数）；气泡会跟着变宽，太长了桌宠那边再从中间省略
+    parts = [_part(g, verb) for g, verb in groups[:2]]
     return Summary(main, f'{main.project or "当前会话"}｜{"、".join(parts)}')
 
 

@@ -35,12 +35,12 @@ class SummarizeTest(unittest.TestCase):
     def test_groups_are_listed_by_importance(self):
         a = s(5, project='a', turn=10)
         b, c, d = s(60, project='b'), s(90, state='waiting', project='c'), s(95, state='waiting', project='d')
-        self.assertEqual(summarize([a, b, c, d], NOW).sub, 'a｜2 个在等你、1 个在忙')
+        self.assertEqual(summarize([a, b, c, d], NOW).sub, 'a｜2 个在等你、b 在忙')
 
-    def test_only_the_first_group_is_named_and_at_most_two_groups(self):
+    def test_at_most_two_groups(self):
         a = s(5, project='a', turn=10)
         items = [a, s(60, state='error', project='e'), s(60, state='waiting', project='w'), s(60, project='b')]
-        self.assertEqual(summarize(items, NOW).sub, 'a｜e 出错了、1 个在等你')
+        self.assertEqual(summarize(items, NOW).sub, 'a｜e 出错了、w 在等你')
 
     def test_a_single_failed_tool_call_is_not_an_error(self):
         a, b = s(5, project='a', turn=10), s(14, state='oops', project='PicGO')
