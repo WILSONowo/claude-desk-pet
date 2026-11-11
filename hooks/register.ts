@@ -351,7 +351,7 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
     const status: [PetState, string] = [READING.has(e.tool) ? 'reading' : 'tool', describe(e.tool, input)]
     if (isMain) {
-      await setMain($, ...status)
+      await setMain($, status[0], status[1])
     } else if (!AGENT_TOOLS.has(e.tool)) {
       // 小助手的动作：记下来，桌宠说"小助手在读 xx"；顺便证明这个会话还活着
       helpers.set(e.agentId, await $.clock.now())

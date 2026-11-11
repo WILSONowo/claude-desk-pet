@@ -34,7 +34,7 @@ from motion import (
     settle, spawn, swing_step, tick,
 )
 from screen import choose_z, is_fullscreen, place_bubble, visible_span
-from sessions import Session, new_sound, summarize
+from sessions import BUSY, Session, busy, new_sound, summarize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.path.join(os.path.dirname(HERE), 'sounds')
@@ -1052,14 +1052,19 @@ class Pet:
             summary = summarize(items, now)   # 跟哪个会话；别的会话的情况写进第二行小字
             self.sub = summary.sub
             main = summary.main
-            if main and (main.key, main.mtime) != self.last_seen:
-                self.last_seen = (main.key, main.mtime)
-                state = 'waiting' if main.state == 'hello' else main.state
+            # 说自己在忙、却很久没动静的会话（卡住了，或者 Claude 被关掉时没来得及说再见）：当成在发呆，不再一直"思考中"
+            quiet = main is not None and main.state in BUSY and not busy(main, now)
+            if main and (main.key, main.mtime, quiet) != self.last_seen:
+                self.last_seen = (main.key, main.mtime, quiet)
+                state = 'waiting' if main.state == 'hello' or quiet else main.state
                 state = state if state in SPRITES or state == 'oops' else 'waiting'
                 changed = state != self.state
                 self.state, self.text, self.project = state, main.text, main.project
                 # 状态从什么时候开始按会话里记的算：换回一个早就干完的会话时不会重新敲门；只是换了文字也不重新计时
-                self.state_since = min(now, main.started) if main.since else (now if changed else self.state_since)
+                if quiet:
+                    self.state_since = main.mtime - IDLE_AFTER   # 直接打瞌睡
+                else:
+                    self.state_since = min(now, main.started) if main.since else (now if changed else self.state_since)
                 if changed:
                     self.hop_at = now
             self.check_command()
